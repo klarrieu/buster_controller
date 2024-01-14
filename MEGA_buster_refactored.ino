@@ -11,13 +11,15 @@ DateTime now;
 byte servoPin = 13;
 Servo servo;
 // FILENAME SHORT 8.3 CHARACTERS!!
-String file_name = "THW0113.TXT";
+String file_name = "THW0114.TXT";
 File sd;
-
+// start pressure used as reference to determine when we are underwater [mbar]
+float start_pressure;
+// speeds are PWM signals in [us] for T200 thruster, 1500 = idle, <1500 = reverse thrust (thruster installed in reverse)
 int speed_0 = 1500;
-long cd = 5000;
 int speeds[5] = {1450, 1425, 1375, 1325, 1100};
-long ts[5] = {420000, 300000, 240000, 240000, 240000};
+// corresponding time to run each speed [ms]
+long ts[5] = {300000, 300000, 240000, 240000, 240000};
 int num_speeds = sizeof(speeds) / sizeof(speeds[0]);
 int i = 0;
 int num_cycles = 3;
@@ -38,7 +40,6 @@ void setup() {
   }
   rtc.start();
   Serial.println("RTC started");
-  // not sure what the point is here...7 seconds at speed 0?
   servo.writeMicroseconds(speed_0);
   delay(7000); 
   // PT sensor setup
@@ -48,6 +49,8 @@ void setup() {
   }
   PT_sensor.setModel(MS5837::MS5837_30BA);
   PT_sensor.setFluidDensity(1029); // kg/m^3 (freshwater, 1029 for seawater)
+  PT_sensor.read();
+  start_pressure = PT_sensor.pressure();
   // SD card setup
   Serial.print("Initializing SD...");
   pinMode(53, OUTPUT);
@@ -57,13 +60,14 @@ void setup() {
   else{
     Serial.println("SD initialized");
   }
-  // run servo at speed 1 for 3 seconds, then speed 0 for 5 seconds?
+  // run servo at speed 1 for 3 seconds, then idle for 5 seconds
   servo.writeMicroseconds(1450);
   delay(3000);
   servo.writeMicroseconds(speed_0);
   delay(5000);
   // SD card logging begin
   sd = SD.open(file_name, FILE_WRITE);
+  // log message for end of initialization
   sd.println();
   sd.println();
   sd.println("initialization done.");
@@ -95,19 +99,42 @@ void log_time_PT() {
   sd.flush();
 }
 
+void check_pressure() {
+  // make sure we are at least 2 m depth before continuing
+  PT_sensor.read();
+  while (PT_sensor.pressure() < start_pressure + 200) {
+    Serial.print("Pressure: ");
+    Serial.println(PT_sensor.pressure());
+    Serial.print("Threshold pressure: ");
+    Serial.println(start_pressure + 200);
+    log_time_PT();
+    Serial.println("Still at surface, waiting 10 s...");
+    sd.println("Still at surface, waiting 10 s...");
+    sd.flush();
+    delay(10000);
+    PT_sensor.read();
+  }
+  Serial.print("Pressure: ");
+  Serial.println(PT_sensor.pressure());
+  Serial.println("At sufficient depth. Continuing...");
+  sd.print("Pressure: ");
+  sd.println(PT_sensor.pressure());
+  sd.println("At sufficient depth. Continuing...");
+}
+
 void flush() {
   Serial.println("Step 0");
-  sd.println("Flushing at 1900 for 15s");
+  sd.println("Flushing at 1100 for 15s");
   servo.writeMicroseconds(1100);
   delay(14500);   
   servo.writeMicroseconds(speed_0);
   delay(1000);  
-  sd.println("Flushing at 1100 for 15s");
+  sd.println("Flushing at 1900 for 15s");
   servo.writeMicroseconds(1900);
   delay(14500);   
   sd.println("Flushing done. Wait 5 seconds");  
   servo.writeMicroseconds(speed_0);
-  delay(cd);
+  delay(5000);
   log_time_PT();
   // -------------------------------------------------
   sd.println("--------------------------");
@@ -159,21 +186,22 @@ void idle() {
 }
 
 void loop() {
-
   Serial.println("Started another loop...");
-
+  // flush for first cycle
   if(i == 0){
-    Serial.println("Wait 300s..."); // +xs initialization
+    check_pressure();
+    Serial.println("Wait 300s...");
     delay(250000);
     log_time_PT();
     flush();
   }
+  // otherwise just wait 5 min between cycles
   else {
-    Serial.println("Wait 300s..."); // +xs initialization
+    Serial.println("Wait 300s...");
     delay(250000);
     log_time_PT();
   }
-
+  // run through all speeds
   if(i < num_cycles) {
     Serial.println("Cycle " + String(i + 1));
     for (int j = 0; j < num_speeds; j++) {
@@ -181,6 +209,7 @@ void loop() {
     }
     finish_cycle();
   }
+  // if we have run all depths/cycles, idle
   else {
     idle();
   }
