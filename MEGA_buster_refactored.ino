@@ -1,3 +1,4 @@
+#include <LowPower.h>
 #include <Servo.h>
 #include "RTClib.h"
 #include <Wire.h>
@@ -11,7 +12,7 @@ DateTime now;
 byte servoPin = 13;
 Servo servo;
 // FILENAME SHORT 8.3 CHARACTERS!!
-String file_name = "THW0114.TXT";
+String file_name = "THW0115.TXT";
 File sd;
 // start pressure used as reference to determine when we are underwater [mbar]
 float start_pressure;
@@ -25,10 +26,11 @@ int i = 0;
 int num_cycles = 3;
 
 void setup() {
-  // servo setup
+  // Start serial stream
   Serial.begin(9600);
-  servo.attach(servoPin);
   Serial.println("Initializing...");
+  // servo setup
+  servo.attach(servoPin);
   // RTC setup
   if (! rtc.begin()) {
     Serial.println("RTC NOT found");
@@ -41,7 +43,7 @@ void setup() {
   rtc.start();
   Serial.println("RTC started");
   servo.writeMicroseconds(speed_0);
-  delay(7000); 
+  delay(7000);
   // PT sensor setup
   Wire.begin();
   if (!PT_sensor.init()) {
@@ -72,6 +74,37 @@ void setup() {
   sd.println();
   sd.println("initialization done.");
   sd.flush();
+}
+
+void sleep(long time_ms) {
+  // low power sleep as alternative to delay()
+  // splits the total time into a series of 8s and 1s sleep periods (limitation of low power library)
+  // subtract one second for re-initialization of servo after sleep
+  int time_s = time_ms / 1000 - 1;
+  int num_8s_sleeps = time_s / 8;
+  int num_1s_sleeps = time_s - (8 * num_8s_sleeps);
+  Serial.println("Sleeping...");
+  sd.println("Sleeping...");
+  // flush before sleep so stream isn't corrupted
+  Serial.flush();
+  sd.flush();
+  for (int i = 0; i < num_8s_sleeps; i++){
+    // keep timer 1 on (used by servo), SPI, and TWI (I2C) (not sure if needed)
+    LowPower.idle(SLEEP_8S, ADC_OFF, TIMER5_OFF, TIMER4_OFF, TIMER3_OFF,
+        TIMER2_OFF, TIMER1_OFF, TIMER0_OFF, SPI_OFF, USART3_OFF,
+        USART2_OFF, USART1_OFF, USART0_OFF, TWI_OFF);
+  }
+  for (int i = 0; i < num_1s_sleeps; i++){
+    LowPower.idle(SLEEP_1S, ADC_OFF, TIMER5_OFF, TIMER4_OFF, TIMER3_OFF,
+        TIMER2_OFF, TIMER1_OFF, TIMER0_OFF, SPI_OFF, USART3_OFF,
+        USART2_OFF, USART1_OFF, USART0_OFF, TWI_OFF);
+  }
+  // re-initialize servo
+  Serial.println("Awake!");
+  sd.println("Awake!");
+  sd.flush();
+  servo.writeMicroseconds(speed_0);
+  delay(1000);
 }
 
 void log_time_PT() {
@@ -126,12 +159,12 @@ void flush() {
   Serial.println("Step 0");
   sd.println("Flushing at 1100 for 15s");
   servo.writeMicroseconds(1100);
-  delay(14500);   
+  delay(14500);
   servo.writeMicroseconds(speed_0);
-  delay(1000);  
+  delay(1000);
   sd.println("Flushing at 1900 for 15s");
   servo.writeMicroseconds(1900);
-  delay(14500);   
+  delay(14500);
   sd.println("Flushing done. Wait 5 seconds");  
   servo.writeMicroseconds(speed_0);
   delay(5000);
@@ -161,7 +194,7 @@ void run_speed(int j) {
 
 void finish_cycle() {
   servo.writeMicroseconds(speed_0);
-  delay(7000); 
+  delay(7000);
   i += 1;
   Serial.println("Done for this depth.");
   sd.println("Done for this depth.");
@@ -191,14 +224,14 @@ void loop() {
   if(i == 0){
     check_pressure();
     Serial.println("Wait 300s...");
-    delay(250000);
+    sleep(250000);
     log_time_PT();
     flush();
   }
   // otherwise just wait 5 min between cycles
   else {
     Serial.println("Wait 300s...");
-    delay(250000);
+    sleep(250000);
     log_time_PT();
   }
   // run through all speeds
