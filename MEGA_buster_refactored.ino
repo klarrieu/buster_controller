@@ -11,19 +11,20 @@ RTC_PCF8523 rtc;
 DateTime now;
 byte servoPin = 13;
 Servo servo;
-// FILENAME SHORT 8.3 CHARACTERS!!
-String file_name = "THW0115.TXT";
+// FILENAME SHORT 8.3 CHARACTERS!! WILL NOT SAVE IF FILENAME IS NOT SHORT 8.3 FORMAT!! (limitation of Arduino SD library)
+String file_name = "VIS0001.TXT";
 File sd;
-// start pressure used as reference to determine when we are underwater [mbar]
+// start/gague pressure used as reference to determine when we are underwater [mbar] (see check_pressure function)
 float start_pressure;
 // speeds are PWM signals in [us] for T200 thruster, 1500 = idle, <1500 = reverse thrust (thruster installed in reverse)
-int speed_0 = 1500;
-int speeds[5] = {1450, 1425, 1375, 1325, 1100};
+int speed_0 = 1500;  // PWM signal corresponding to idle/zero thrust
+int speeds[8] = {1450, 1425, 1400, 1375, 1350, 1325, 1300, 1100};  // PWM signals for the various speeds to run in a cycle
 // corresponding time to run each speed [ms]
-long ts[5] = {300000, 300000, 240000, 240000, 240000};
+long ts[8] = {420000, 300000, 240000, 240000, 240000, 240000, 240000, 240000};
 int num_speeds = sizeof(speeds) / sizeof(speeds[0]);
 int i = 0;
-int num_cycles = 3;
+// number of times to execute cycle (i.e. number of depths run on a single cast)
+int num_cycles = 1;
 
 void setup() {
   // Start serial stream
@@ -51,6 +52,7 @@ void setup() {
   }
   PT_sensor.setModel(MS5837::MS5837_30BA);
   PT_sensor.setFluidDensity(1029); // kg/m^3 (freshwater, 1029 for seawater)
+  // get starting/gauge pressure to use as reference for check_pressure function
   PT_sensor.read();
   start_pressure = PT_sensor.pressure();
   // SD card setup
@@ -77,29 +79,31 @@ void setup() {
 }
 
 void sleep(long time_ms) {
-  // low power sleep as alternative to delay()
-  // splits the total time into a series of 8s and 1s sleep periods (limitation of low power library)
+  // low power sleep mode as alternative to delay()
+  // splits the total sleep time into a series of 8s and 1s sleep periods (limitation of low power library)
+  // NOTE: thruster will lose power during sleep! Only use for long periods when thruster is idle.
   // subtract one second for re-initialization of servo after sleep
   int time_s = time_ms / 1000 - 1;
   int num_8s_sleeps = time_s / 8;
   int num_1s_sleeps = time_s - (8 * num_8s_sleeps);
   Serial.println("Sleeping...");
   sd.println("Sleeping...");
-  // flush before sleep so stream isn't corrupted
+  // flush logs before sleep so stream isn't corrupted
   Serial.flush();
   sd.flush();
+  // 8 second sleeps
   for (int i = 0; i < num_8s_sleeps; i++){
-    // keep timer 1 on (used by servo), SPI, and TWI (I2C) (not sure if needed)
     LowPower.idle(SLEEP_8S, ADC_OFF, TIMER5_OFF, TIMER4_OFF, TIMER3_OFF,
         TIMER2_OFF, TIMER1_OFF, TIMER0_OFF, SPI_OFF, USART3_OFF,
         USART2_OFF, USART1_OFF, USART0_OFF, TWI_OFF);
   }
+  // 1 second sleeps
   for (int i = 0; i < num_1s_sleeps; i++){
     LowPower.idle(SLEEP_1S, ADC_OFF, TIMER5_OFF, TIMER4_OFF, TIMER3_OFF,
         TIMER2_OFF, TIMER1_OFF, TIMER0_OFF, SPI_OFF, USART3_OFF,
         USART2_OFF, USART1_OFF, USART0_OFF, TWI_OFF);
   }
-  // re-initialize servo
+  // use last second to re-initialize servo/thruster (it will beep)
   Serial.println("Awake!");
   sd.println("Awake!");
   sd.flush();
@@ -129,11 +133,13 @@ void log_time_PT() {
   sd.println(PT_sensor.pressure());
   sd.print("T ");
   sd.println(PT_sensor.temperature());
+  // flush to SD card
   sd.flush();
 }
 
 void check_pressure() {
-  // make sure we are at least 2 m depth before continuing
+  // blocking function to make sure we are at least 2 m depth 
+  // (200 mb above start pressure) before continuing
   PT_sensor.read();
   while (PT_sensor.pressure() < start_pressure + 200) {
     Serial.print("Pressure: ");
@@ -141,6 +147,12 @@ void check_pressure() {
     Serial.print("Threshold pressure: ");
     Serial.println(start_pressure + 200);
     log_time_PT();
+    if (PT_sensor.pressure() > 1000000 || start_pressure > 1000000){
+      // assume depth sensor busted
+      Serial.println("PRESSURE SENSOR NOT WORKING, continuing without pressure check...");
+      sd.println("PRESSURE SENSOR NOT WORKING, continuing without pressure check...");
+      break;
+    };
     Serial.println("Still at surface, waiting 10 s...");
     sd.println("Still at surface, waiting 10 s...");
     sd.flush();
@@ -156,6 +168,7 @@ void check_pressure() {
 }
 
 void flush() {
+  // buster flushing sequence
   Serial.println("Step 0");
   sd.println("Flushing at 1100 for 15s");
   servo.writeMicroseconds(1100);
@@ -177,6 +190,7 @@ void flush() {
 }
 
 void run_speed(int j) {
+  // run the buster at the speed corresponding to index j
   sd.print("ESC runs at ");
   sd.print(speeds[j]);
   sd.print(" for ");
@@ -193,6 +207,7 @@ void run_speed(int j) {
 }
 
 void finish_cycle() {
+  // put thruster into idle and log that we are done for the depth
   servo.writeMicroseconds(speed_0);
   delay(7000);
   i += 1;
@@ -204,6 +219,8 @@ void finish_cycle() {
 }
 
 void idle() {
+  // idle once all speeds have been completed.
+  // Periodically spins the thruster at low speed and logs time/PT.
   now = rtc.now();
   PT_sensor.read();
   sd.println();
@@ -220,9 +237,10 @@ void idle() {
 
 void loop() {
   Serial.println("Started another loop...");
-  // flush for first cycle
+  // check pressure and flush for first cycle
   if(i == 0){
     check_pressure();
+    // note countdown starts *after* reaching threshold depth
     Serial.println("Wait 300s...");
     sleep(250000);
     log_time_PT();
